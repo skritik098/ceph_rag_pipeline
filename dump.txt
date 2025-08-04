@@ -1,0 +1,95 @@
+## From semantic_search.py file
+
+'''
+    llm_selection_prompt = f"""
+You are an expert Ceph assistant whose sole task is to find a command that *perfectly matches* a user's query.
+
+I have performed a search for relevant commands in the Ceph knowledge base based on the user's query.
+
+Here is the user's query:
+User Query: "{query}"
+
+Here is the list of commands I found, along with their descriptions and intent:
+---
+Available Commands:
+"""
+    for idx, cmd_data in enumerate(results):
+        command_name = cmd_data.get("command", "N/A")
+        description = cmd_data.get("description", "N/A")
+        query_intent = cmd_data.get("query_intent", "N/A")
+
+        llm_selection_prompt += f"Command Name: {command_name}\n"
+        llm_selection_prompt += f"Description: {description}\n"
+        llm_selection_prompt += f"Query Intent: {query_intent}\n"
+        llm_selection_prompt += "-------------\n"
+
+    llm_selection_prompt += f"""
+---
+Your task is to review this list and make a decision.
+
+**Decision Rules:**
+1.  **Carefully read the user's query and the commands provided.**
+2.  **IF AND ONLY IF** a command from the list is a direct and perfect match for the user's query, you should respond with the name of that command.
+3.  **If NO COMMAND in the list is a good match, or if the user's query is about a topic not covered by any of these commands, you MUST respond with 'NO_MATCH'.**
+
+**The 'NO_MATCH' option is a completely valid and expected response.**
+
+Respond ONLY with the 'command_name' of the selected command, or 'NO_MATCH'.
+
+Your Answer: """
+
+    print(llm_selection_prompt)
+    prompt = llm_selection_prompt
+
+    # Format the prompt with explicit instruction
+    choices_str = "\n".join(
+        [
+            f"Command Name: {cmd['command']}, Command Description: {cmd['description'][0]}" for cmd in results
+        ]
+    )
+
+    # Prompt engineering to restrict the LLM to local knowledge
+    system_prompt = (
+        "You are an expert system designed to select the best Ceph command "
+        "based on a user's query. You MUST only choose from the provided list of commands. "
+        "Do NOT suggest any command not explicitly listed here, and do NOT provide any external information. "
+        "Your task is to identify the single most relevant command name from the list below that directly "
+        "addresses the user's need. If no command from the list is suitable, respond with 'NO_MATCH'."
+        "IF the provided list of commands DOES NOT MATCHES with the USER QUERY, RESPOND BACK with 'NO_MATCH'"
+    )
+
+    user_query_prompt = (
+        f"User Query: '{query}'\n\n"
+        f"Available Commands (choose only one by name, or 'NO_MATCH'):\n"
+        f"""\n{choices_str}\n"""
+        f"Based on the User Query, which of these commands is the MOST appropriate? IF the provided list of commands DOES NOT MATCHES with the USER QUERY, RESPOND BACK with 'NO_MATCH' "
+        f"Respond ONLY with the exact 'Command Name' or 'NO_MATCH'. Do not add any other text or explanation.\n"
+        f"Command Name: "
+    )
+
+    prompt = f"{system_prompt}\n\n{user_query_prompt}"
+    
+    prompt = f"""
+        You are an expert in Ceph command-line usage. Given the following user query:
+        "{query}"
+        Choose ONLY ONE most appropriate command from the list below. DO NOT generate any new command, and DO NOT modify any command.
+        Commands:
+        "{choices_str}"
+        Reply with the "Command Name" corresponding to the best matching command ONLY and NOTHING ELSE example "ceph -s" or "ceph osd df".
+        DO NOT include or add prefix in reponse like `The answer is: `
+        """
+    '''
+
+
+## From basic_commands.json
+
+{
+  "command": "radosgw-admin bucket list",
+  "description": "List all the rgw buckets present in the cluster.",
+  "query_intent": "How many RGW buckets created in the cluster?"
+}
+{
+  "command": "rados df",
+  "description": "Similar to 'ceph df' but at a lower RADOS level.",
+  "query_intent": "What is the low-level storage usage in RADOS?"
+},

@@ -1,0 +1,5 @@
+*.pyc
+database/
+faiss_index_store/
+dummy*
+venv2/
