@@ -93,3 +93,651 @@ Your Answer: """
   "description": "Similar to 'ceph df' but at a lower RADOS level.",
   "query_intent": "What is the low-level storage usage in RADOS?"
 },
+
+=================================================================
+
+
+## From fileOps refactoring file
+
+
+def build_index(
+    json_path,
+    model_name="all-MiniLM-L6-v2",
+    index_path="./faiss_index_store/ceph_faiss.index",
+    metadata_path="./faiss_index_store/ceph_faiss_metadata.json"
+):
+    with open(json_path) as f:
+        data = json.load(f)
+
+    model = SentenceTransformer(model_name)
+    texts = [f"{entry['query_intent']} | {entry['description']}" for entry in data]
+    embeddings = model.encode(texts, show_progress_bar=True)
+
+    dimension = embeddings[0].shape[0]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+
+    faiss.write_index(index, index_path)
+    with open(metadata_path, "w") as f:
+        json.dump(data, f)
+    
+    print("✅ FAISS index and metadata saved.")
+    return model
+
+
+
+def build_index(
+    json_path,
+    model_name="all-MiniLM-L6-v2",
+    index_path="./faiss_index_store/ceph_faiss.index",
+    metadata_path="./faiss_index_store/ceph_faiss_metadata.json"
+):
+    with open(json_path) as f:
+        data = json.load(f)
+
+    model = SentenceTransformer(model_name)
+    texts = [f"{entry['query_intent']} | {entry['description']}" for entry in data]
+    embeddings = model.encode(texts, show_progress_bar=True)
+
+    dimension = embeddings[0].shape[0]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+
+    faiss.write_index(index, index_path)
+    with open(metadata_path, "w") as f:
+        json.dump(data, f)
+    
+    print("✅ FAISS index and metadata saved.")
+    return model
+
+# --------------------
+# Phase 2: Load Index
+# --------------------
+
+
+def load_index(
+    json_path="./database/basic_commands.json",
+    model_name="all-MiniLM-L6-v2",
+    index_path="./faiss_index_store/ceph_faiss.index",
+    metadata_path="./faiss_index_store/ceph_faiss_metadata.json"
+):
+    print("Validating index existence...")
+    print("--------------------------------")
+    if os.path.exists(index_path) and os.path.exists(metadata_path):
+        model = SentenceTransformer(model_name)
+        print("🔁 Loading existing FAISS index and query mapping...")
+        index = faiss.read_index(index_path)
+        with open(metadata_path, "rb") as f:
+            data = json.load(f)
+        
+    else:
+        print("⚙️ Building new FAISS index...")
+        #model = build_index(json_path) # Here using the normal build without grouping
+        #model = build_index_chunky(json_path)  # Trying to use chunky build method with grouping
+        model = build_index_combined(json_path)
+        index = faiss.read_index(index_path)
+        with open(metadata_path, "rb") as f:
+            data = json.load(f)
+    return index, data, model
+
+
+# Building Index with combined Intent & Description
+
+def build_index_combined(
+    json_path,
+    model_name="all-MiniLM-L6-v2",
+    index_path="./faiss_index_store/ceph_faiss.index",
+    metadata_path="./faiss_index_store/ceph_faiss_metadata.json"
+):
+    with open(json_path) as f:
+        data = json.load(f)
+
+    # Group by command
+    grouped = {}
+    for entry in data:
+        cmd = entry["command"]
+        if cmd not in grouped:
+            grouped[cmd] = {
+                "command": cmd,
+                "query_intent": [],
+                "description": []
+            }
+        grouped[cmd]["query_intent"].append(entry["query_intent"])
+        grouped[cmd]["description"].append(entry["description"])
+
+    # Prepare texts and metadata
+    combined_metadata = []
+    texts = []
+
+    for group in grouped.values():
+        joined_intent = " | ".join(group["query_intent"])
+        joined_desc = " | ".join(group["description"])
+        combined_text = f"{joined_intent} | {joined_desc}"
+        texts.append(combined_text)
+
+        combined_metadata.append({
+            "command": group["command"],
+            "query_intent": joined_intent,
+            "description": joined_desc
+        })
+
+    # Embedding & indexing
+    model = SentenceTransformer(model_name)
+    embeddings = model.encode(
+        texts,
+        normalize_embeddings=True,
+        show_progress_bar=True
+    )
+
+    dimension = embeddings[0].shape[0]
+    #index = faiss.IndexFlatL2(dimension) # Here we are using L2 FAISS embedding
+    index = faiss.IndexFlatIP(dimension)  # Here we are using Cosine Similarity
+    index.add(embeddings)
+
+    faiss.write_index(index, index_path)
+    with open(metadata_path, "w") as f:
+        json.dump(combined_metadata, f)
+
+    print("✅ FAISS index and grouped metadata saved.")
+    return model
+
+# Building & loading Index with Chunky Vectorization
+
+
+def build_index_chunky(
+    json_path: str,
+    chunk_size: int = 300,
+    chunk_overlap: int = 50,
+    model="all-MiniLM-L6-v2",
+    index_path="./faiss_index_store/ceph_faiss.index",
+    metadata_path="./faiss_index_store/ceph_faiss_metadata.json"
+):
+    # Load data
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    # Group entries by command
+    grouped = defaultdict(list)
+    for entry in data:
+        grouped[entry["command"]].append(
+            f"{entry['query_intent']} | {entry['description']}"
+        )
+
+    # Initialize model
+    model = SentenceTransformer(model)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ".", " ", ""],
+    )
+
+    # Chunk and embed
+    all_chunks = []
+    metadata = {}
+    id_counter = 0
+    for command, combined_entries in grouped.items():
+        full_text = "\n".join(combined_entries)
+        chunks = text_splitter.split_text(full_text)
+
+        for chunk in chunks:
+            all_chunks.append(chunk)
+            metadata[id_counter] = {
+                "command": command,
+                "chunk": chunk,
+            }
+            id_counter += 1
+
+    embeddings = model.encode(all_chunks, show_progress_bar=True)
+    dimension = embeddings[0].shape[0]
+
+    # Build index
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+
+    # Save index & metadata
+    faiss.write_index(index, index_path)
+    with open(metadata_path, "w") as f:
+        json.dump(data, f)
+    print("✅ FAISS index and metadata saved.")
+    return model
+
+'''
+def prepare_chunked_data(data: List[Dict], chunk_size: int = 300, chunk_overlap: int = 50) -> List[Dict]:
+    """
+    Groups entries by command, combines their descriptions and intents,
+    then chunks the combined text and attaches metadata.
+    
+    Returns a list of dicts where each dict represents a chunk with:
+    - 'chunk_text': the actual text
+    - 'command': the original CLI command
+    """
+    grouped = defaultdict(list)
+
+    # Step 1: Group all descriptions and intents by command
+    for item in data:
+        cmd = item['command']
+        grouped[cmd].append(f"{item['description']} (Intent: {item['query_intent']})")
+
+    chunked_data = []
+
+    # Step 2: For each command, join and chunk
+    for cmd, entries in grouped.items():
+        combined_text = " ".join(entries)
+
+        # Simple overlapping chunking
+        for i in range(0, len(combined_text), chunk_size - chunk_overlap):
+            chunk = combined_text[i:i + chunk_size]
+            chunked_data.append({
+                'chunk_text': chunk.strip(),
+                'command': cmd
+            })
+
+    return chunked_data
+'''
+
+=================================================================
+
+
+## From semantic_search file
+
+def search_command(index, metadata, model, query, top_k=3, threshold=0.9):
+    query_embedding = model.encode([query], convert_to_numpy=True)
+    distances, indices = index.search(query_embedding, top_k)
+
+    results = []
+    for score, idx in zip(distances[0], indices[0]):
+        if score <= threshold:  # Only include if similarity is good enough
+            matched_data = metadata[int(idx)]
+            results.append({
+                "score": float(score),
+                "command": matched_data["command"],
+                "description": matched_data["description"],
+                "query_intent": matched_data["query_intent"]
+            })
+    return results
+
+
+
+def get_relevance_judge_prompt(user_query, available_commands):
+    judge_prompt = f"""
+You are a relevance judge. Your only task is to analyze a user's query and a list of commands, and determine if ANY of the commands are relevant to the query.
+
+Here is the user's query:
+User Query: "{user_query}"
+
+---
+Available Commands:
+"""
+    for cmd_data in available_commands:
+        command_name = cmd_data.get("command", "N/A")
+        description = cmd_data.get("description", "N/A")
+        judge_prompt += f"- Command Name: {command_name}\n"
+        judge_prompt += f"Description: {description}\n"
+        judge_prompt += "\n\n"
+
+    judge_prompt += """
+Based ONLY on the information above, does this list contain at ANY one command that is relevant to the user's query?
+
+Respond ONLY with the word 'YES' or 'NO'. Do not provide any other text.
+Your Answer: """
+    return judge_prompt
+
+
+def get_llm_selection_prompt(user_query, available_commands):
+    llm_selection_prompt = f"""
+You are a command classifier. Your only task is to analyze a user's query and select a command name from a provided list.
+
+Your knowledge is strictly limited to the commands and their descriptions below. You must not use any external knowledge to answer.
+
+Here is the user's query:
+User Query: "{user_query}"
+
+---
+Available Commands:
+"""
+    # --- The for loop from before remains the same ---
+    for idx, cmd_data in enumerate(available_commands):
+        command_name = cmd_data.get("command", "N/A")
+        description = cmd_data.get("description", "N/A")
+        query_intent = cmd_data.get("query_intent", "N/A")
+
+        llm_selection_prompt += f"Command Name: {command_name}\n"
+        llm_selection_prompt += f"Description: {description}\n"
+        llm_selection_prompt += f"Query Intent: {query_intent}\n"
+        llm_selection_prompt += "---\n"
+    # --- End of loop ---
+
+    llm_selection_prompt += f"""
+---
+Based **ONLY** on the information provided above, your task is to choose the single best-matching `Command Name` for the user's query.
+
+**Decision Rules:**
+1. **The selected command MUST be one of the exact `Command Name` strings from the list above.**
+2. **If NO command in the list is a perfect or even a highly relevant match for the user's query, you MUST respond with the exact string 'NO_MATCH'.**
+
+Respond ONLY with the `Command Name` or 'NO_MATCH'. DO NOT generate ANY new commands or EXPLANATORY text.
+
+Your Answer: """
+    return llm_selection_prompt
+
+
+def search_and_select_command_with_llm(
+    index,
+    metadata,
+    model,
+    query,
+    model_choice,
+    llm_model,
+    top_k=3,
+    threshold=0.9
+):
+    results = search_command(
+        index=index,
+        metadata=metadata,
+        model=model,
+        query=query,
+        top_k=top_k,
+        threshold=threshold
+    )
+    if results:
+        print(f"Vector search provided the following top-{top_k} commands:")
+        for r in results:
+            print(f"[Score: {r['score']:.4f}] ➜ {r['command']}")
+            print(f"  → {r['description']}\n")
+    else:
+        print("No relevant command found in the vector DB search.")
+        return None, None
+
+    prompt = get_llm_selection_prompt(query, results)
+    # Step 4: Use LLM to select best matching command
+    if model_choice == 'o':
+        selected_command_name = run_llm_query_with_ollama(
+            prompt,
+            model=llm_model
+            )
+    elif model_choice == 'l':
+        selected_command_name = run_llm_query_with_lmstudio(prompt)
+    else:
+        print("Invalid choice. Use 'o' for Ollama or 'l' for LM Studio.")
+        return
+    return validates_LLM_halicunation(
+        selected_command=selected_command_name,
+        results=results
+    )
+
+
+def validates_LLM_halicunation(selected_command, results):
+    # Validates the halicunation of the LLM
+    # --- After you get the LLM response from the model ---
+    print(f"LLM selected a valid command: {selected_command}")
+    # Get a list of all available command names from your retrieved results
+    available_commands = [
+        cmd_data.get("command", "N/A") for cmd_data in results
+        ]
+
+    # --- The failsafe check ---
+    if selected_command == "NO_MATCH":
+        print("LLM correctly determined no suitable command from the list.")
+        return {}, []
+    elif selected_command in available_commands:
+        print(f"LLM selected a valid command: {selected_command}")
+        return results, selected_command
+    else:
+        # This block catches the exact problem you encountered
+        print(f"LLM hallucinated a command: '{selected_command}'. It was not in the provided list.")
+        return {}, []
+
+
+================================================================
+
+## From llm_response file
+
+
+def run_llm_query_with_ollama(
+    prompt: str,
+    model,
+    temperature: float = 0.2
+):
+    """
+    Executes a prompt using the LLM model and returns the response.
+
+    Args:
+        prompt (str): The prompt to send to the LLM.
+        model (str): The LLM model to use.
+
+    Returns:
+        str: The LLM's response.
+    """
+    print(f"Using the model {model}\n")
+    response = ollama.chat(model=model, messages=[{"role": "user", "content": prompt}])
+    return response['message']['content'].strip()
+
+
+# Point OpenAI client to LM Studio's local server
+openai.api_base = "http://localhost:1234/v1"
+openai.api_key = "not-needed"
+
+
+def run_llm_query_with_lmstudio(
+    prompt: str,
+    model="llama3",
+    temperature: float = 0.2
+):
+    """
+    Executes a prompt using the LLM model and returns the response.
+
+    Args:
+        prompt (str): The prompt to send to the LLM.
+        model (str): The LLM model to use.
+
+    Returns:
+        str: The LLM's response.
+    """
+    response = openai.ChatCompletion.create(
+        model=model_name,  # Replace with the actual name of the model loaded in LM Studio
+        messages=[
+            #{"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.0,
+        max_tokens=100
+    )
+    return response.choices[0].message.content.strip()
+
+
+def select_command_with_ollama(user_query, filtered_commands, model):
+    """
+    Uses an LLM to choose the most appropriate command from the top-k search results.
+
+    Args:
+        query (str): The user's natural language query.
+        top_k_results (List[Tuple[str, float]]): A list of (command, score) tuples from FAISS.
+        model: An instance of an LLM interface (e.g., OpenAI, Ollama) with a `.generate()` or `.chat()` method.
+
+    Returns:
+        str: The selected command from the provided options.
+    """
+
+    '''
+    system_prompt = """You are a strict assistant. You MUST only select ONE command from the provided options based on the user query. 
+    Do not generate any new command. Respond with the selected command string only."""
+
+    choices_str = "\n".join([f"- {cmd['command']}: {cmd['description'][0]}" for cmd in filtered_commands])
+    prompt = f"{system_prompt}\n\nAvailable Commands:\n{choices_str}\n\nUser Query: {user_query}\n\nWhich command best fits?"
+    '''
+
+    # Format the prompt with explicit instruction
+    choices_str = "\n".join([f"Command Name: {cmd['command']}, Command Description: {cmd['description'][0]}" for cmd in filtered_commands])
+    prompt = f"""
+        You are an expert in Ceph command-line usage. Given the following user query:
+        "{user_query}"
+        Choose ONLY ONE most appropriate command from the list below. DO NOT generate any new command, and DO NOT modify any command.
+        Commands:
+        "{choices_str}"
+        Reply with the "Command Name" corresponding to the best matching command ONLY and NOTHING ELSE example "ceph -s" or "ceph osd df".
+        DO NOT include or add prefix in reponse like `The answer is: `
+        """
+
+    response = ollama.chat(model="llama3", messages=[{"role": "user", "content": prompt}])
+    return response['message']['content'].strip()
+
+
+# Point OpenAI client to LM Studio's local server
+openai.api_base = "http://localhost:1234/v1"
+openai.api_key = "not-needed"
+
+
+def select_command_with_lmstudio(user_query, filtered_commands, model_name):
+    system_prompt = """You are a strict assistant. You MUST only select ONE command from the provided options based on the user query. 
+    Do not generate any new command. Respond with the selected command string only."""
+
+    choices_str = "\n".join([f"- {cmd['command']}: {cmd['description'][0]}" for cmd in filtered_commands])
+    prompt = f"""
+        You are an expert in Ceph command-line usage. Given the following user query:
+        "{user_query}"
+        Choose ONLY ONE most appropriate command from the list below. DO NOT generate any new command, and DO NOT modify any command.
+        Commands:
+        "{choices_str}"
+        Reply with the number corresponding to the best matching command ONLY (e.g., 1 or 2 or 3).
+        """
+
+    response = openai.ChatCompletion.create(
+        model=model_name,  # Replace with the actual name of the model loaded in LM Studio
+        messages=[
+            #{"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.0,
+        max_tokens=100
+    )
+    return response.choices[0].message.content.strip()
+
+
+
+=========================================================
+From agentic_logic file
+
+
+
+def analyze_response(
+    user_query: str,
+    selected_command: str,
+    command_output: str,
+    llm_response_func,  # Your get_llm_response function
+    command_description: str,  # Optional: the specific description text of the chosen command purpose
+    model_name: str  # Model for Ollama LLM
+) -> str:
+    """
+    Analyzes the command output based on the user's query and generates a
+    concise, human-readable response using the LLM. The LLM is strictly
+    constrained to the provided command output.
+
+    Args:
+        user_query (str): The original natural language query from the user.
+        command_name (str): The name of the command that was executed.
+        command_output (str): The raw stdout from the executed command.
+        llm_response_func (callable): The function to call the LLM (e.g.,
+            get_llm_response from your Ollama setup).
+        selected_purpose_description (str): An optional detailed description of
+            *why* this command was chosen. Helps LLM focus on the relevant part
+            of output.
+        model_name (str): The name of the Ollama LLM model (e.g., "llama3").
+
+    Returns:
+        str: A natural language answer extracted and summarized from the command
+            output. Returns an informative message if extraction fails.
+    """
+    print("Agent Action: Analyzing command output and generating response...")
+
+    # Craft the system prompt to strictly constrain the LLM
+    system_prompt = (
+        "You are an expert Ceph administrator assistant. Your ONLY task is to "
+        "extract and summarize information from the provided 'COMMAND OUTPUT' "
+        "to answer the 'USER QUERY'. DO NOT use any external knowledge. "
+        "DO NOT invent information. If the information is not directly available "
+        "or cannot be clearly inferred from the 'COMMAND OUTPUT', state that the "
+        "information is not found in the provided output or that you cannot answer. "
+        "Be concise, clear, and directly answer the question based *only* on the "
+        "provided text."
+    )
+
+    # Craft the user-specific prompt
+    user_prompt_parts = [
+        f"User Query: {user_query}",
+        f"Command Executed: {selected_command}"
+    ]
+
+    if command_description:
+        user_prompt_parts.append(
+            f"The executed command's relevance is: {command_description}"
+        )
+
+    user_prompt_parts.append(
+        f"COMMAND OUTPUT:\n```\n{command_output}\n```\n\n"
+        "Please extract the relevant information from the COMMAND OUTPUT to answer "
+        "the USER QUERY. Provide a concise, human-readable answer."
+    )
+
+    prompt = "\n\n".join(user_prompt_parts)
+    try:
+        # Call your Ollama-backed LLM function
+        # A slightly higher temperature might allow for more natural phrasing,
+        # but keep it low for factual extraction
+        llm_response = llm_response_func(
+            prompt=f"{system_prompt}\n\n{prompt}",
+            model=model_name,
+            temperature=0.1,  # Keep temperature low for factual extraction
+
+        )
+        return llm_response.strip()
+
+    except Exception as e:
+        print(f"Error during LLM response generation: {e}")
+        return "Sorry, I encountered an error while processing the command output."
+
+
+====================================================================
+
+# From agent.py file
+
+
+'''
+def main():
+    user_query = "How many service running in the ceph cluster?"
+    print(f"Query: {user_query}")
+    print("--------------------------------")
+
+    index, metadata, model = load_index("./database/basic_commands.json")
+    print("Searching for command...")
+    print("Results:")
+    print("--------------------------------")
+
+    filtered_commands = search_command(index, metadata, model, user_query, top_k=3, model_choice)  # Here this search_command can become a tool for MCP to use
+    if filtered_commands:
+        for r in filtered_commands:
+            print(f"[Score: {r['score']:.4f}] ➜ {r['command']}")
+            print(f"  → {r['description']}\n")
+    else:
+        print("No relevant command found with sufficient confidence.")
+        sys.exit(1)
+
+    # Step 3: Pick which LLM to use
+    model_choice = input("Use Ollama or LM Studio? (o/l): ").strip().lower()
+
+    # Step 4: Use LLM to select best matching command
+    if model_choice == 'o':
+        selected_command = select_command_with_ollama(user_query, filtered_commands, model="llama3")
+    elif model_choice == 'l':
+        selected_command = select_command_with_lmstudio(user_query, filtered_commands)
+    else:
+        print("Invalid choice. Use 'o' for Ollama or 'l' for LM Studio.")
+        return
+
+    # Step 5: Output selected command
+    print(f"\nLLM Selected Command:\n{selected_command.strip()}")
+
+    # Step-6: Execute the selected command on the ceph cluster
+
+    stdout, stderr, retcode = execute_command(selected_command.strip())
+
+'''
