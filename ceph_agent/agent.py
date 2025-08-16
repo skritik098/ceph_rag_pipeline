@@ -3,6 +3,107 @@ from rag.semantic_search import semanticCephSearch
 from utils.file_ops import vectorBuilder
 from ceph.executor import execute_command
 import os
+import re
+import json
+import ollama
+
+
+def userSystemPrompt() -> str:
+    prompt = """
+    You are an expert assistant for a Ceph AI agent.  
+    Your task is to:  
+
+    1. Classify the user query into one of two modes:  
+    - **Planning Mode** → The query is about "how to" instructions, troubleshooting, workflows, or multi-step processes. In this case, break down the query into a sequence of steps, where each step will later map to commands via vector search.
+    - **Direct Mode** → The query is a simple lookup or single command request. In this case, send the query directly to vector search without breaking it down.  
+
+    2. Detect whether the query involves **destructive or high-risk actions** (delete, remove, purge, shutdown).  
+    - If yes, mark it as `"unsafe"`. Do not suggest commands.  
+    - If no, continue as normal.  
+
+    3. When in **Planning Mode**, only return **logical task steps** (e.g., "Check OSD status") and **not** raw commands. Commands will be retrieved later.  
+
+    4. Always respond in **strict JSON only**. Do not include any extra text outside the JSON.  
+
+    The response must match exactly this schema:  
+
+    ```json: response:
+    {
+    "mode": "planning" | "direct",
+    "safety": "safe" | "unsafe",
+    "reasoning": "Short explanation of classification",
+    "steps": [
+        "If planning: high-level logical steps only",
+        "If direct: leave empty"
+    ],
+    "warning": "Only if unsafe, else empty"
+    }
+    """
+    return prompt
+
+
+def extract_json(text):
+    """Extract first JSON object from LLM output safely"""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return json.loads(match.group(0))
+    raise ValueError("No valid JSON found in response")
+
+
+def search_and_execute(cephSearch, user_query, model_choice):
+            print("Searching for command...")
+            print("Results:")
+            print("--------------------------------")
+
+            # Step-4: Search & Select the best available command
+            vect_results, selected_command = cephSearch._search_select_with_llm(
+                query=user_query,
+                model_choice=model_choice
+            )
+
+            if not selected_command:
+                print(
+                    "Agent Response: I couldn't find a suitable Ceph command for your "
+                    "query in my knowledge base."
+                )
+                return
+            # Step-5: Execute the selected command on the ceph cluster
+            stdout, stderr, retcode = execute_command(selected_command.strip())
+
+            print(stdout)
+
+            # Step-6: Analyse the output as per the user_query
+            # To get the description for 'docker_build'
+            if retcode != 0:
+                agent_response = (
+                    f"Agent Response: I executed '{selected_command}', but it "
+                    f"returned an error.\n"
+                    f"Error details: {stderr if stderr else 'No specific error message.'}\n"
+                    "Please check the command or your Ceph environment."
+                )
+            else:
+                # Step 5: Output Analysis & Response Generation Module
+                # The selected_purpose_description can be extracted from selected_command_data
+                # if you have a specific description of *why* this command was chosen.
+                # For simplicity, let's just use the main description text if available.
+                description = next((item['description'] for item in vect_results if item['command'] == selected_command.strip()), 'Description not found.')
+                agent = analysePrompt(
+                    query=user_query,
+                    selected_command=selected_command,
+                    command_out=stdout,
+                    command_description=description,
+                    model_choice=model_choice
+                )
+                
+                agent_response = agent._analyze_response()
+
+                if not agent_response:
+                    agent_response = (
+                        "Agent Response: I executed the command, but could not extract "
+                        "a clear answer from its output based on your query."
+                    )
+                print(f"\nAgent Response: {agent_response}")
+                print("\n------------------------------------")
 
 
 def main():
@@ -21,7 +122,6 @@ def main():
     # retrieved as part of initialisation
     #index, metadata, model = vector_store._load_index()
 
-    #llm_response = llmResponse()
     cephSearch = semanticCephSearch(
         vector_store=vector_store,
         llm_model="granite3.3:8b",
@@ -43,59 +143,44 @@ def main():
         model_choice = input("Use Ollama or LM Studio? (o/l): ").strip().lower()
         print("\n--- Processing Query ---")
 
-        print("Searching for command...")
-        print("Results:")
-        print("--------------------------------")
-
-        # Step-4: Search & Select the best available command
-        vect_results, selected_command = cephSearch._search_select_with_llm(
-            query=user_query,
-            model_choice=model_choice
-        )
-
-        if not selected_command:
-            print(
-                "Agent Response: I couldn't find a suitable Ceph command for your "
-                "query in my knowledge base."
-            )
-            continue
-        # Step-5: Execute the selected command on the ceph cluster
-        stdout, stderr, retcode = execute_command(selected_command.strip())
-
-        print(stdout)
-
-        # Step-6: Analyse the output as per the user_query
-        # To get the description for 'docker_build'
-        if retcode != 0:
-            agent_response = (
-                f"Agent Response: I executed '{selected_command}', but it "
-                f"returned an error.\n"
-                f"Error details: {stderr if stderr else 'No specific error message.'}\n"
-                "Please check the command or your Ceph environment."
-            )
+        system_prompt = userSystemPrompt()
+        if model_choice == 'o':
+            modeResponse = extract_json(
+                    ollama.chat(
+                        model="granite3.3:8b",
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": user_query
+                            },
+                            {
+                                "role": "system",
+                                "content": system_prompt
+                            },
+                        ]
+                    )["message"]["content"].strip()
+                )
         else:
-            # Step 5: Output Analysis & Response Generation Module
-            # The selected_purpose_description can be extracted from selected_command_data
-            # if you have a specific description of *why* this command was chosen.
-            # For simplicity, let's just use the main description text if available.
-            description = next((item['description'] for item in vect_results if item['command'] == selected_command.strip()), 'Description not found.')
-            agent = analysePrompt(
-                query=user_query,
-                selected_command=selected_command,
-                command_out=stdout,
-                command_description=description,
+            return
+
+        print(modeResponse)
+
+        if modeResponse["mode"] == "direct":
+            print(f"User Query: {user_query}")
+            search_and_execute(
+                cephSearch=cephSearch,
+                user_query=user_query,
                 model_choice=model_choice
             )
-            
-            agent_response = agent._analyze_response()
-
-            if not agent_response:
-                agent_response = (
-                    "Agent Response: I executed the command, but could not extract "
-                    "a clear answer from its output based on your query."
+        else:
+            print(f"User Query: {user_query}")
+            for i, step in enumerate(modeResponse["steps"]):
+                print(f"--------- Step {i}: {step}--------")
+                search_and_execute(
+                    cephSearch=cephSearch,
+                    user_query=step,
+                    model_choice=model_choice
                 )
-            print(f"\nAgent Response: {agent_response}")
-            print("\n------------------------------------")
 
 
 if __name__ == "__main__":
