@@ -165,7 +165,10 @@ def main():
 
         print(modeResponse)
 
-        if modeResponse["mode"] == "direct":
+        if modeResponse["safety"] == "unsafe":
+            print("⚠️ Unsafe operation detected:", modeResponse["warning"])
+            return
+        elif modeResponse["mode"] == "direct":
             print(f"User Query: {user_query}")
             search_and_execute(
                 cephSearch=cephSearch,
