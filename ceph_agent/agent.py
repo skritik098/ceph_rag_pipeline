@@ -7,101 +7,51 @@ import re
 import json
 import ollama
 
-
-def userSystemPrompt() -> str:
-    prompt = """
-    You are an expert assistant for a Ceph AI agent.  
-    Your task is to:  
-
-    1. Classify the user query into one of two modes:  
-    - **Planning Mode** → The query is about "how to" instructions, troubleshooting, workflows, or multi-step processes. In this case, break down the query into a sequence of steps, where each step will later map to commands via vector search.
-    - **Direct Mode** → The query is a simple lookup or single command request. In this case, send the query directly to vector search without breaking it down.  
-
-    2. Detect whether the query involves **destructive or high-risk actions** (delete, remove, purge, shutdown).  
-    - If yes, mark it as `"unsafe"`. Do NOT suggest commands.  
-    - If no, continue as normal.  
-
-    3. When in **Planning Mode**, only return **logical task steps** 
-    (e.g., "Check OSD status") and **NOT** raw commands. Commands will be retrieved later.  
-
-    4. Always respond in **strict JSON only**. Do not include any extra text outside the JSON.  
-
-    The response must match exactly this schema:  
-
-    ```json: response:
-    {
-    "mode": "planning" | "direct",
-    "safety": "safe" | "unsafe",
-    "reasoning": "Short explanation of classification",
-    "steps": [
-        "If planning: high-level logical steps only",
-        "If direct: leave empty"
-    ],
-    "warning": "Only if unsafe, else empty"
-    }
-    """
-    return prompt
+# --- Agent Definitions ---
 
 
-def extract_json(text):
-    """Extract first JSON object from LLM output safely"""
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        return json.loads(match.group(0))
-    raise ValueError("No valid JSON found in response")
+class RetrieverAgent:
+    """Finds the best command for a given query."""
+    def __init__(self, ceph_search_instance):
+        self.ceph_search = ceph_search_instance
 
-
-def search_and_execute(cephSearch, user_query, model_choice, execution_context):
-    print("Searching for command...")
-    print("Results:")
-    print("--------------------------------")
-
-    # Step-4: Search & Select the best available command
-    vect_results, selected_command = cephSearch._search_select_with_llm(
-        query=user_query,
-        model_choice=model_choice
-    )
-
-    if not selected_command:
-        print(
-            "Agent Response: I couldn't find a suitable Ceph command for your "
-            "query in my knowledge base."
+    def find_command(self, query: str, model_choice: str) -> (str, list):
+        print("➡️ RetrieverAgent: Searching for command...")
+        vect_results, selected_command = self.ceph_search.search_and_select(
+            query=query,
+            model_choice=model_choice
         )
-        return execution_context
-    # Step-5: Execute the selected command on the ceph cluster
-    stdout, stderr, retcode = execute_command(selected_command.strip())
+        if not selected_command:
+            print("🔴 RetrieverAgent: Could not find a suitable command.")
+            return None, []
+        
+        print(f"✅ RetrieverAgent: Found command: '{selected_command.strip()}'")
+        return selected_command.strip(), vect_results
 
-    print(stdout)
 
-    # Store the output in the context for future steps
-    current_step_key = f"step_{len(execution_context) + 1}"
-    execution_context[current_step_key] = {
-        "query": user_query,
-        "command": selected_command.strip(),
-        "stdout": stdout,
-        "stderr": stderr,
-        "returncode": retcode
-    }
+class ExecutorAgent:
+    """Executes a command on the Ceph cluster."""
+    def run(self, command: str) -> (str, str, int):
+        print(f"➡️ ExecutorAgent: Running command: '{command}'")
+        stdout, stderr, retcode = execute_command(command)
+        if retcode != 0:
+            print(f"🔴 ExecutorAgent: Command failed with return code {retcode}.")
+        else:
+            print("✅ ExecutorAgent: Command executed successfully.")
+        return stdout, stderr, retcode
 
-    # Step-6: Analyse the output as per the user_query
-    # To get the description for 'docker_build'
-    if retcode != 0:
-        agent_response = (
-            f"Agent Response: I executed '{selected_command}', but it "
-            f"returned an error.\n"
-            f"Error details: {stderr if stderr else 'No specific error message.'}\n"
-            "Please check the command or your Ceph environment."
-        )
-    else:
-        # Step 5: Output Analysis & Response Generation Module
-        # The selected_purpose_description can be extracted from selected_command_data
-        # if you have a specific description of *why* this command was chosen.
-        # For simplicity, let's just use the main description text if available.
-        description = next((item['description'] for item in vect_results if item['command'] == selected_command.strip()), 'Description not found.')
+
+class AnalyzerAgent:
+    """Analyzes command output to generate a final response."""
+    def analyze(self, query: str, command: str, command_out: str, vect_results: list, model_choice: str) -> str:
+        print("➡️ AnalyzerAgent: Analyzing command output...")
+
+        description = next((item['description'] for item in vect_results if item['command'] == command), 'Description not found.')
+
         agent = analysePrompt(
-            query=user_query,
-            selected_command=selected_command,
-            command_out=stdout,
+            query=query,
+            selected_command=command,
+            command_out=command_out,
             command_description=description,
             model_choice=model_choice
         )
@@ -109,31 +59,81 @@ def search_and_execute(cephSearch, user_query, model_choice, execution_context):
         agent_response = agent._analyze_response()
 
         if not agent_response:
-            agent_response = (
-                "Agent Response: I executed the command, but could not extract "
-                "a clear answer from its output based on your query."
-            )
-        print(f"\nAgent Response: {agent_response}")
-        print("\n------------------------------------")
+            agent_response = "I executed the command, but could not extract a clear answer from its output."
 
-        return execution_context
+        print("✅ AnalyzerAgent: Analysis complete.")
+        return agent_response
 
+
+# --- Utility Functions ---
+
+def userSystemPrompt() -> str:
+    prompt = """
+    You are an expert assistant for a Ceph Command AI agent. You are a high-level PLANNER. Your job is to analyze a user's goal and create a plan. Another agent will be responsible for finding the specific commands later.
+
+    1.  **Classify the user query into one of two modes:**
+        -   **Direct Mode:** The query can be answered with a **single command**. This includes most "check," "get," "list," or "show" requests.
+            -   *Example Direct Queries:* "check cluster health", "what is the status of the OSDs?", "list all the pools".
+        -   **Planning Mode:** The query requires **multiple, sequential commands** to achieve a final goal. This is for complex workflows, troubleshooting, or tasks with dependencies.
+            -   *Example Planning Queries:* "Create a new RBD image and map it to a host", "Find all inactive PGs and attempt to repair them".
+
+    2.  **Detect Destructive Actions:**
+        -   If the query involves high-risk actions (delete, remove, purge, shutdown), mark it as `"safety": "unsafe"`.
+        -   Otherwise, mark it as `"safety": "safe"`.
+
+    3.  **CRITICAL RULE for Planning Mode Steps:**
+        -   Steps **MUST** be high-level goals described in natural language.
+        -   Under NO circumstances should you ever include a raw command (like "ceph osd tree" or "rbd create") in the "steps" array. Your role is to define WHAT to do, not HOW to do it.
+
+    4.  **Good vs. Bad Step Examples:**
+        -   **BAD Step (Vague/GUI-based):** "Navigate to the Ceph cluster management interface."
+        -   **BAD Step (Contains a command):** "Run 'ceph health' to see the status."
+        -   **GOOD Step (Clear CLI Goal):** "Check the overall health of the cluster."
+        -   **GOOD Step (Clear CLI Goal):** "Identify all unhealthy OSDs."
+
+    5.  **Respond in STRICT JSON only.** The response must match this schema exactly:
+        ```json
+        {
+          "mode": "planning" | "direct",
+          "safety": "safe" | "unsafe",
+          "reasoning": "Short explanation of your classification and plan.",
+          "steps": [
+            "If planning: natural language goals only. NO COMMANDS.",
+            "If direct: leave empty."
+          ],
+          "warning": "Only if unsafe, else empty."
+        }
+        ```
+    """
+    return prompt
+
+
+def extract_json(text):
+    # Your existing extract_json function (no changes needed)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return json.loads(match.group(0))
+    raise ValueError("No valid JSON found in response")
+
+
+# --- Main Controller ---
 
 def main():
-    print("Initializing Ceph Agent...")
+    """
+    The Controller.
+    Orchestrates the workflow by managing agents and state.
+    """
+    print("Initializing Ceph Agent Controller...")
     print("--------------------------------")
-    # Set the environment variable to false to disable parallelism
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    # Step-1: Loading the Database
+
+    # --- Step 1: Initialize Vector Store and Agents ---
     vector_store = vectorBuilder(
         json_path="./database/basic_commands.json",
         model_name="all-MiniLM-L6-v2",
         index_path="./faiss_index_store/ceph_faiss.index",
         metadata_path="./faiss_index_store/ceph_faiss_metadata.json"
     )
-    # Either retrieve the below parameters as it is as it is already 
-    # retrieved as part of initialisation
-    #index, metadata, model = vector_store._load_index()
 
     cephSearch = semanticCephSearch(
         vector_store=vector_store,
@@ -142,83 +142,118 @@ def main():
         threshold=0.9
     )
 
-    while True:
-        # Step-2: Take the user query input
-        user_query = input(
-            "\nYour Ceph Query (e.g., 'check cluster health'): "
-        ).strip()
+    # Instantiate our specialized agents
+    retriever = RetrieverAgent(cephSearch)
+    executor = ExecutorAgent()
+    analyzer = AnalyzerAgent()
 
+    while True:
+        # --- Step 2: Get User Input ---
+        user_query = input("\nYour Ceph Query (e.g., 'check cluster health'): ").strip()
         if user_query.lower() in ['exit', 'quit']:
             print("Exiting Ceph Agent. Goodbye!")
             break
-        
-        # Step 3: Pick which LLM to use
+
         model_choice = input("Use Ollama or LM Studio? (o/l): ").strip().lower()
         print("\n--- Processing Query ---")
 
+        # --- Step 3: Classify the Task (Controller Logic) ---
         system_prompt = userSystemPrompt()
-        if model_choice == 'o':
-            decisionResponse = ollama.chat(
-                            model="granite3.3:8b",
-                            messages=[
-                                {
-                                    "role": "user",
-                                    "content": user_query
-                                },
-                                {
-                                    "role": "system",
-                                    "content": system_prompt
-                                },
-                            ]
-                        )["message"]["content"].strip()
-        else:
-            return
-
-        print(decisionResponse)
-        modeResponse = extract_json(decisionResponse)
-
-        if modeResponse["safety"] == "unsafe":
-            print("⚠️ Unsafe operation detected:", modeResponse["warning"])
-            continue
-        elif modeResponse["mode"] == "direct":
-            print(f"User Query: {user_query}")
-            search_and_execute(
-                cephSearch=cephSearch,
-                user_query=user_query,
-                model_choice=model_choice,
-                execution_context={}
+        try:
+            modeResponse = extract_json(
+                ollama.chat(
+                    model="granite3.3:8b",
+                    messages=[
+                        {"role": "user", "content": user_query},
+                        {"role": "system", "content": system_prompt},
+                    ]
+                )["message"]["content"].strip()
             )
-        else:
-            print(f"User Query: {user_query}")
-            # 1. Initialize the shared context for this plan
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"🔴 Controller: Could not parse LLM response for classification. Error: {e}")
+            continue
+
+        if modeResponse.get("safety") == "unsafe":
+            print(f"⚠️ Controller: Unsafe operation detected. {modeResponse.get('warning', '')}")
+            continue
+
+        # --- Step 4: Orchestrate Agent Workflow ---
+        if modeResponse.get("mode") == "direct":
+            print(f"🕹️ Controller: Direct Mode. Executing single task for '{user_query}'")
+            command, vect_results = retriever.find_command(user_query, model_choice)
+            if command:
+                stdout, stderr, retcode = executor.run(command)
+                if retcode == 0:
+                    final_response = analyzer.analyze(user_query, command, stdout, vect_results, model_choice)
+                    print(f"\n💡 Agent Response: {final_response}")
+                else:
+                    print(f"\n💡 Agent Response: I executed '{command}', but it failed. Error: {stderr}")
+
+        elif modeResponse.get("mode") == "planning":
+            print(f"🗺️ Controller: Planning Mode. Executing plan for '{user_query}'")
             execution_context = {}
-            for i, step in enumerate(modeResponse["steps"]):
-                print(f"--------- Step {i}: {step}--------")
-
-                # 2. Create a rich query that includes historical context
-                # This helps the LLM find a command relevant to the *current* state
+            steps = modeResponse.get("steps", [])
+            plan_successful = True  # Flag to track plan success
+            
+            for i, step_goal in enumerate(steps):
+                print(f"\n--------- Executing Step {i + 1}: {step_goal} --------")
+                
                 contextual_query = f"""
-                Previous Steps and Outputs: {json.dumps(execution_context, indent=2)}
-                Current Goal: "{step}"
+                Original User Goal: "{user_query}"
+                Previous Steps and Summarized Outputs: {json.dumps(execution_context, indent=2)}
+                Current Goal: "{step_goal}"
                 """
-
-                # 3. Call search_and_execute and update the context
-                execution_context = search_and_execute(
-                    cephSearch=cephSearch,
-                    user_query=contextual_query,  # Use the new contextual query
-                    model_choice=model_choice,
-                    execution_context=execution_context
-                )
-
-                # Optional: Add a check to stop if a step failed
-                last_step_key = f"step_{len(execution_context)}"
-                if execution_context.get(last_step_key, {}).get("returncode", 0) != 0:
-                    print(f"⚠️ Step {i + 1} failed. Aborting plan execution.")
+                
+                command, vect_results = retriever.find_command(contextual_query, model_choice)
+                if command:
+                    stdout, stderr, retcode = executor.run(command)
+                    
+                    if retcode == 0:
+                        # UPDATED: Analyze the output and store the SUMMARY in the context.
+                        step_response = analyzer.analyze(step_goal, command, stdout, vect_results, model_choice)
+                        print(f"✅ Step {i + 1} Summary: {step_response}")
+                        execution_context[f"step_{i+1}"] = {
+                            "goal": step_goal,
+                            "command": command,
+                            "summary": step_response # Store the concise summary
+                        }
+                    else:
+                        # Handle step failure
+                        print(f"🔴 Step {i + 1} failed. Aborting plan.")
+                        execution_context[f"step_{i+1}"] = {"goal": step_goal, "command": command, "error": stderr}
+                        plan_successful = False
+                        break
+                else:
+                    print(f"🔴 Could not find a command for step '{step_goal}'. Aborting plan.")
+                    plan_successful = False
                     break
             
             print("\n--- Plan Execution Finished ---")
-            print("Final Execution Context:", json.dumps(execution_context, indent=2))
 
+            # UPDATED: Add the final synthesis step.
+            if plan_successful:
+                print("➡️ Synthesizing final answer from plan results...")
+                synthesis_prompt = f"""
+                The user's original query was: "{user_query}"
+                A multi-step plan was executed. Here are the summaries of what was done in each step:
+                {json.dumps(execution_context, indent=2)}
+                
+                Based on the results of these steps, provide a comprehensive final answer to the user's original query.
+                """
+                # We can reuse the analyzer's LLM call for this.
+                # Here we pass the synthesis prompt as the "query" to the analyzer's underlying LLM.
+                #final_answer = analyzer.agent.llm.invoke(synthesis_prompt) # You may need to expose the llm call from the analyzer agent.
+                # A simpler way if you don't want to modify the analyzer:
+                final_answer = ollama.chat(
+                    model="granite3.3:8b",
+                    messages=[{
+                        'role': 'user',
+                        'content': synthesis_prompt
+                    }])['message']['content']
+                print(f"\n✅ Final Answer: {final_answer}")
+            else:
+                print("Plan failed. Final context log:")
+                print(json.dumps(execution_context, indent=2))
 
 
 if __name__ == "__main__":
