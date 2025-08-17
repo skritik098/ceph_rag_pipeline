@@ -44,11 +44,47 @@ class vectorBuilder:
                 data = json.load(f)
         else:
             print("⚙️ Building new FAISS index...")
-            model = self._build_index_combined(self.json_path)
+            model = self._build_index_dynamic()
             index = faiss.read_index(self.index_path)
             with open(self.metadata_path, "rb") as f:
                 data = json.load(f)
         return index, data, model
+
+    # --- NEW: Function to handle the complex/dynamic JSON structure ---
+    def _build_index_dynamic(self):
+        with open(self.json_path, 'r') as f:
+            data = json.load(f)
+
+        texts_for_embedding = []
+        # The metadata will be the list of the full, original JSON objects
+        full_metadata = data
+
+        for command_obj in data:
+            description = command_obj.get("description", "")
+            intent_tags = ", ".join(command_obj.get("intent_tags", []))
+            
+            param_summaries = []
+            for param in command_obj.get("parameters", []):
+                param_summaries.append(f"{param.get('name')} ({param.get('description')})")
+            
+            param_text = " | Parameters: " + "; ".join(param_summaries) if param_summaries else ""
+            
+            combined_text = f"{description} | Intents: {intent_tags}{param_text}"
+            texts_for_embedding.append(combined_text)
+
+        print("Embedding command descriptions...")
+        model = SentenceTransformer(self.model_name)
+        embeddings = model.encode(texts_for_embedding, normalize_embeddings=True, show_progress_bar=True)
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+        index.add(embeddings)
+
+        print("Saving FAISS index and full metadata...")
+        faiss.write_index(index, self.index_path)
+        with open(self.metadata_path, "w") as f:
+            json.dump(full_metadata, f, indent=2)
+
+        print("✅ FAISS index and dynamic metadata saved.")
+        return model, index, full_metadata
 
     # Build Vector DB Combined Intent & Description
     def _build_index_combined(self):
@@ -106,6 +142,7 @@ class vectorBuilder:
 
         print("✅ FAISS index and grouped metadata saved.")
         return model
+
 
     # Building & loading Index with Chunky Vectorization
     def _build_index_chunky(

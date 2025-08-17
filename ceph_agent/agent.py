@@ -17,7 +17,7 @@ class RetrieverAgent:
 
     def find_command(self, query: str, model_choice: str) -> (str, list):
         print("➡️ RetrieverAgent: Searching for command...")
-        vect_results, selected_command = self.ceph_search.search_and_select(
+        vect_results, selected_command = self.ceph_search.search_select_and_build(
             query=query,
             model_choice=model_choice
         )
@@ -129,7 +129,7 @@ def main():
 
     # --- Step 1: Initialize Vector Store and Agents ---
     vector_store = vectorBuilder(
-        json_path="./database/basic_commands.json",
+        json_path="./database/complex_commands.json",
         model_name="all-MiniLM-L6-v2",
         index_path="./faiss_index_store/ceph_faiss.index",
         metadata_path="./faiss_index_store/ceph_faiss_metadata.json"
