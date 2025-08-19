@@ -44,7 +44,7 @@ class vectorBuilder:
                 data = json.load(f)
         else:
             print("⚙️ Building new FAISS index...")
-            model = self._build_index_combined(self.json_path)
+            model = self._build_index_combined()
             index = faiss.read_index(self.index_path)
             with open(self.metadata_path, "rb") as f:
                 data = json.load(f)

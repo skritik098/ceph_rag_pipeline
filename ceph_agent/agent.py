@@ -193,6 +193,7 @@ def main():
             print(f"🗺️ Controller: Planning Mode. Executing plan for '{user_query}'")
             execution_context = {}
             steps = modeResponse.get("steps", [])
+            print(steps.join(".\n"))
             plan_successful = True  # Flag to track plan success
             
             for i, step_goal in enumerate(steps):
