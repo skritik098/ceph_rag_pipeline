@@ -1,123 +1,13 @@
-from core.agent_logic import analysePrompt
 from rag.semantic_search import semanticCephSearch
 from utils.file_ops import vectorBuilder
-from ceph.executor import execute_command
+from agent.agentsList import RetrieverAgent, ExecutorAgent, AnalyzerAgent
+from utils.utilities import userSystemPrompt, extract_json
 import os
-import re
 import json
 import ollama
 
-# --- Agent Definitions ---
-
-
-class RetrieverAgent:
-    """Finds the best command for a given query."""
-    def __init__(self, ceph_search_instance):
-        self.ceph_search = ceph_search_instance
-
-    def find_command(self, query: str, model_choice: str) -> (str, list):
-        print("➡️ RetrieverAgent: Searching for command...")
-        vect_results, selected_command = self.ceph_search.search_and_select(
-            query=query,
-            model_choice=model_choice
-        )
-        if not selected_command:
-            print("🔴 RetrieverAgent: Could not find a suitable command.")
-            return None, []
-        
-        print(f"✅ RetrieverAgent: Found command: '{selected_command.strip()}'")
-        return selected_command.strip(), vect_results
-
-
-class ExecutorAgent:
-    """Executes a command on the Ceph cluster."""
-    def run(self, command: str) -> (str, str, int):
-        print(f"➡️ ExecutorAgent: Running command: '{command}'")
-        stdout, stderr, retcode = execute_command(command)
-        if retcode != 0:
-            print(f"🔴 ExecutorAgent: Command failed with return code {retcode}.")
-        else:
-            print("✅ ExecutorAgent: Command executed successfully.")
-        return stdout, stderr, retcode
-
-
-class AnalyzerAgent:
-    """Analyzes command output to generate a final response."""
-    def analyze(self, query: str, command: str, command_out: str, vect_results: list, model_choice: str) -> str:
-        print("➡️ AnalyzerAgent: Analyzing command output...")
-
-        description = next((item['description'] for item in vect_results if item['command'] == command), 'Description not found.')
-
-        agent = analysePrompt(
-            query=query,
-            selected_command=command,
-            command_out=command_out,
-            command_description=description,
-            model_choice=model_choice
-        )
-
-        agent_response = agent._analyze_response()
-
-        if not agent_response:
-            agent_response = "I executed the command, but could not extract a clear answer from its output."
-
-        print("✅ AnalyzerAgent: Analysis complete.")
-        return agent_response
-
-
-# --- Utility Functions ---
-
-def userSystemPrompt() -> str:
-    prompt = """
-    You are an expert assistant for a Ceph Command AI agent. You are a high-level PLANNER. Your job is to analyze a user's goal and create a plan. Another agent will be responsible for finding the specific commands later.
-
-    1.  **Classify the user query into one of two modes:**
-        -   **Direct Mode:** The query can be answered with a **single command**. This includes most "check," "get," "list," or "show" requests.
-            -   *Example Direct Queries:* "check cluster health", "what is the status of the OSDs?", "list all the pools".
-        -   **Planning Mode:** The query requires **multiple, sequential commands** to achieve a final goal. This is for complex workflows, troubleshooting, or tasks with dependencies.
-            -   *Example Planning Queries:* "Create a new RBD image and map it to a host", "Find all inactive PGs and attempt to repair them".
-
-    2.  **Detect Destructive Actions:**
-        -   If the query involves high-risk actions (delete, remove, purge, shutdown), mark it as `"safety": "unsafe"`.
-        -   Otherwise, mark it as `"safety": "safe"`.
-
-    3.  **CRITICAL RULE for Planning Mode Steps:**
-        -   Steps **MUST** be high-level goals described in natural language.
-        -   Under NO circumstances should you ever include a raw command (like "ceph osd tree" or "rbd create") in the "steps" array. Your role is to define WHAT to do, not HOW to do it.
-
-    4.  **Good vs. Bad Step Examples:**
-        -   **BAD Step (Vague/GUI-based):** "Navigate to the Ceph cluster management interface."
-        -   **BAD Step (Contains a command):** "Run 'ceph health' to see the status."
-        -   **GOOD Step (Clear CLI Goal):** "Check the overall health of the cluster."
-        -   **GOOD Step (Clear CLI Goal):** "Identify all unhealthy OSDs."
-
-    5.  **Respond in STRICT JSON only.** The response must match this schema exactly:
-        ```json
-        {
-          "mode": "planning" | "direct",
-          "safety": "safe" | "unsafe",
-          "reasoning": "Short explanation of your classification and plan.",
-          "steps": [
-            "If planning: natural language goals only. NO COMMANDS.",
-            "If direct: leave empty."
-          ],
-          "warning": "Only if unsafe, else empty."
-        }
-        ```
-    """
-    return prompt
-
-
-def extract_json(text):
-    # Your existing extract_json function (no changes needed)
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        return json.loads(match.group(0))
-    raise ValueError("No valid JSON found in response")
-
 
 # --- Main Controller ---
-
 def main():
     """
     The Controller.
