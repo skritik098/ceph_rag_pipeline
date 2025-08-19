@@ -84,7 +84,7 @@ class vectorBuilder:
             json.dump(full_metadata, f, indent=2)
 
         print("✅ FAISS index and dynamic metadata saved.")
-        return model, index, full_metadata
+        return model  #, index, full_metadata
 
     # Build Vector DB Combined Intent & Description
     def _build_index_combined(self):

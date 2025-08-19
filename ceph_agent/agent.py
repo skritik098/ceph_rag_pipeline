@@ -17,7 +17,7 @@ class RetrieverAgent:
 
     def find_command(self, query: str, model_choice: str) -> (str, list):
         print("➡️ RetrieverAgent: Searching for command...")
-        vect_results, selected_command = self.ceph_search.search_select_and_build(
+        selected_command, vect_results = self.ceph_search.search_select_and_build(
             query=query,
             model_choice=model_choice
         )
@@ -46,7 +46,15 @@ class AnalyzerAgent:
     def analyze(self, query: str, command: str, command_out: str, vect_results: list, model_choice: str) -> str:
         print("➡️ AnalyzerAgent: Analyzing command output...")
 
-        description = next((item['description'] for item in vect_results if item['command'] == command), 'Description not found.')
+        #description = next((item['description'] for item in vect_results if item['command'] == command), 'Description not found.')
+        
+        # --- CORRECTED LOGIC ---
+        # Find the template where the final 'command' string starts with the template's 'base_command'.
+        # This correctly handles dynamic commands with parameters.
+        description = next(
+            (item['description'] for item in vect_results if command.startswith(item['base_command'])), 
+            'Description not found.'
+        )
 
         agent = analysePrompt(
             query=query,
@@ -139,7 +147,7 @@ def main():
         vector_store=vector_store,
         llm_model="granite3.3:8b",
         top_k=3,
-        threshold=0.9
+        threshold=0.5
     )
 
     # Instantiate our specialized agents
