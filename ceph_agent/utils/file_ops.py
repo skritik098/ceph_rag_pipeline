@@ -50,8 +50,60 @@ class vectorBuilder:
                 data = json.load(f)
         return index, data, model
 
-    # --- NEW: Function to handle the complex/dynamic JSON structure ---
+    # Let's create a new build function for complex datastructure
     def _build_index_dynamic(self):
+        with open(self.json_path, "r") as f:
+            data = json.load(f)
+
+        # List to store the combined texts
+        texts_for_embedding = []
+
+        # Metadata will be list of full, original JSON data
+        full_metadata = data
+        
+        # Next iterate over each of the JSON data to combine it
+        for command_obj in data:
+            short_description = command_obj.get("short_description", "")
+            long_description = command_obj.get("long_description", "")
+            subsystem  = command_obj.get("subsystem", "")
+            intent_tags = ", ".join(command_obj.get("intent_tags", []))
+
+            param_summaries = []
+            for param in command_obj.get("parameters", []):
+                param_summaries.append(f"{param.get('name')} ({param.get('description')})")
+            param_text = " | Parameters: " + "; ".join(param_summaries) if param_summaries else ""
+
+            examples_summarizes = []
+            for example in command_obj.get("examples", []):
+                examples_summarizes.append(example.get("description"))
+            
+            examples_texts = ", ".join(examples_summarizes)
+
+            combined_text = f"{short_description} | {long_description} | Intents: {intent_tags}{param_text} | {examples_texts} | {command_obj.get("limitations")}"
+            texts_for_embedding.append(combined_text)
+
+        # Now we have the list of texts, next we need to encode it with the help of model
+        print("Embedding command descriptions...")
+        model = SentenceTransformer(self.model_name)
+        embeddings = model.encode(
+            texts_for_embedding,
+            normalize_embeddings=True,
+            show_progress_bar=True
+        )
+
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+        index.add(embeddings)
+
+        print("Saving FAISS index and full metadata...")
+        faiss.write_index(index, self.index_path)
+        with open(self.metadata_path, "w") as f:
+            json.dump(full_metadata, f, indent=2)
+
+        print("✅ FAISS index and dynamic metadata saved.")
+        return model  #, index, full_metadata
+
+    # --- NEW: Function to handle the complex/dynamic JSON structure ---
+    def _build_index_dynamic_old(self): # Modified it to a old one
         with open(self.json_path, 'r') as f:
             data = json.load(f)
 

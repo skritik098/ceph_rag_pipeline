@@ -133,7 +133,7 @@ def userSystemPrompt() -> str:
     3. Reason step-by-step: First, interpret the query’s intent in Ceph context. Second, identify the minimal steps needed. Third, check for destructive keywords to assess safety.
 
     4.  **CRITICAL RULE for Planning Mode Steps:**
-        -   Steps **MUST** be high-level goals described in natural language.
+        -   Steps **MUST** be high-level DETAILED goals described in natural language.
         -   Under NO circumstances should you ever include a raw command (like "ceph osd tree" or "rbd create") in the "steps" array. Your role is to define WHAT to do, not HOW to do it.
 
     5.  **Good vs. Bad Step Examples:**
@@ -227,7 +227,7 @@ def main():
         vector_store=vector_store,
         llm_model="granite3.3:8b",
         top_k=3,
-        threshold=0.5
+        threshold=0.3
     )
 
     # Instantiate our specialized agents

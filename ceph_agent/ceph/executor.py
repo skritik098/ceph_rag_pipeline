@@ -214,7 +214,7 @@ def execute_command(cmd, conf=CEPH_CONF_PATH, username="client.admin", keyring=N
         print(f"An unexpected error occurred: {e}")
         sys.exit(1)
     
-    cmd = "ssh root@130.198.19.212 -i /Users/kritiksachdeva/Downloads/sdf-ssh-key_rsa.prv -- " + cmd
+    cmd = f"ssh root@130.198.19.212 -i /Users/kritiksachdeva/Downloads/sdf-ssh-key_rsa.prv -- '{cmd}'"
 
     result = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=True)
     return result.stdout, result.stderr, result.returncode
